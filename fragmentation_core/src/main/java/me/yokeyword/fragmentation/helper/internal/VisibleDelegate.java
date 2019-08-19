@@ -19,6 +19,7 @@ import me.yokeyword.fragmentation.ISupportFragment;
 public class VisibleDelegate {
     private static final String FRAGMENTATION_STATE_SAVE_IS_INVISIBLE_WHEN_LEAVE = "fragmentation_invisible_when_leave";
     private static final String FRAGMENTATION_STATE_SAVE_COMPAT_REPLACE = "fragmentation_compat_replace";
+    private static final String FRAGMENTATION_STATE_SAVE_ABORT_DISPATCH_VISIBLE = "fragmentation_abort_dispatch_visible";
 
     // SupportVisible相关
     private boolean mIsSupportVisible;
@@ -26,6 +27,9 @@ public class VisibleDelegate {
     private boolean mInvisibleWhenLeave;
     private boolean mIsFirstVisible = true;
     private boolean mFirstCreateViewCompatReplace = true;
+
+    private boolean mAbortDispatchVisible = false;
+    private Runnable taskDispatchSupportVisible;
 
     private Handler mHandler;
     private Bundle mSaveInstanceState;
@@ -44,12 +48,14 @@ public class VisibleDelegate {
             // setUserVisibleHint() may be called before onCreate()
             mInvisibleWhenLeave = savedInstanceState.getBoolean(FRAGMENTATION_STATE_SAVE_IS_INVISIBLE_WHEN_LEAVE);
             mFirstCreateViewCompatReplace = savedInstanceState.getBoolean(FRAGMENTATION_STATE_SAVE_COMPAT_REPLACE);
+            mAbortDispatchVisible = savedInstanceState.getBoolean(FRAGMENTATION_STATE_SAVE_ABORT_DISPATCH_VISIBLE);
         }
     }
 
     public void onSaveInstanceState(Bundle outState) {
         outState.putBoolean(FRAGMENTATION_STATE_SAVE_IS_INVISIBLE_WHEN_LEAVE, mInvisibleWhenLeave);
         outState.putBoolean(FRAGMENTATION_STATE_SAVE_COMPAT_REPLACE, mFirstCreateViewCompatReplace);
+        outState.putBoolean(FRAGMENTATION_STATE_SAVE_ABORT_DISPATCH_VISIBLE, mAbortDispatchVisible);
     }
 
     public void onActivityCreated(@Nullable Bundle savedInstanceState) {
@@ -60,11 +66,11 @@ public class VisibleDelegate {
         if (mFirstCreateViewCompatReplace) {
             mFirstCreateViewCompatReplace = false;
         }
-
-        if (!mInvisibleWhenLeave && !mFragment.isHidden() && mFragment.getUserVisibleHint()) {
+        if ((!mInvisibleWhenLeave || mAbortDispatchVisible)&& !mFragment.isHidden() && mFragment.getUserVisibleHint()) {
             if ((mFragment.getParentFragment() != null && isFragmentVisible(mFragment.getParentFragment()))
                     || mFragment.getParentFragment() == null) {
                 mNeedDispatch = false;
+                mAbortDispatchVisible = false;
                 safeDispatchUserVisibleHint(true);
             }
         }
@@ -72,8 +78,17 @@ public class VisibleDelegate {
 
     public void onResume() {
         if (!mIsFirstVisible) {
-            if (!mIsSupportVisible && !mInvisibleWhenLeave && isFragmentVisible(mFragment)) {
+            if (!mIsSupportVisible && (!mInvisibleWhenLeave || mAbortDispatchVisible) && isFragmentVisible(mFragment)) {
                 mNeedDispatch = false;
+                mAbortDispatchVisible = false;
+                dispatchSupportVisible(true);
+            }
+        } else {
+            //
+            //onActivityCreated() -> onResume() -> onPause() -> onResume() -> onSupportVisible -> onLazyInitView() => onSupportInvisible() -> onPause()
+            if (!mIsSupportVisible && mAbortDispatchVisible && isFragmentVisible(mFragment)) {
+                mNeedDispatch = false;
+                mAbortDispatchVisible = false;
                 dispatchSupportVisible(true);
             }
         }
@@ -83,8 +98,14 @@ public class VisibleDelegate {
         if (mIsSupportVisible && isFragmentVisible(mFragment)) {
             mNeedDispatch = false;
             mInvisibleWhenLeave = false;
+            mAbortDispatchVisible = false;
             dispatchSupportVisible(false);
         } else {
+            if (taskDispatchSupportVisible != null) {
+                getHandler().removeCallbacks(taskDispatchSupportVisible);
+                mAbortDispatchVisible = true;
+                taskDispatchSupportVisible = null;
+            }
             mInvisibleWhenLeave = true;
         }
     }
@@ -126,12 +147,15 @@ public class VisibleDelegate {
     }
 
     private void enqueueDispatchVisible() {
-        getHandler().post(new Runnable() {
+        mAbortDispatchVisible = false;
+        taskDispatchSupportVisible = new Runnable() {
             @Override
             public void run() {
+                taskDispatchSupportVisible = null;
                 dispatchSupportVisible(true);
             }
-        });
+        };
+        getHandler().post(taskDispatchSupportVisible);
     }
 
     private void dispatchSupportVisible(boolean visible) {
